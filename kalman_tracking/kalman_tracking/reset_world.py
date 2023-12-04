@@ -6,8 +6,9 @@ import time
 import rclpy
 import random
 from evader_navigation_node import EvaderNavigationNode
+import sys
 
-def reset_world(node):
+def reset_world(node, mode):
     node.get_logger().warning(f'RESETTING.')
 
     # Reset world in gazebo then spawn a goal in random location in map
@@ -32,15 +33,15 @@ def reset_world(node):
     # stabalise to stop async spawning issues
     time.sleep(0.5)
     gazebo_service_call(request, SpawnEntity, '/spawn_entity', False)
+    
+    if mode == "auto":
+        evader_navigation_node = EvaderNavigationNode(goal_pose)
 
-    evader_navigation_node = EvaderNavigationNode(goal_pose)
-
-    # while the evader_navigation_node is alive
-    while rclpy.ok():
-        rclpy.spin(evader_navigation_node)
-        if not evader_navigation_node.is_alive():
-            break
-    node.get_logger().warning(f'FINISHED.')
+        # while the evader_navigation_node is alive
+        while rclpy.ok():
+            rclpy.spin(evader_navigation_node)
+            if not evader_navigation_node.is_alive():
+                break
 
 def gazebo_service_call(request, msg_type ,service_name, return_result=False):
         node = rclpy.create_node('reset_simulation_node')
@@ -64,7 +65,8 @@ def get_goal_pose():
         
 if __name__ == '__main__':
     rclpy.init()
+    mode = sys.argv[1]
     node = rclpy.create_node('reset_simulation_node')
-    reset_world(node)
+    reset_world(node, mode)
     node.destroy_node()
     rclpy.shutdown()

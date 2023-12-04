@@ -56,7 +56,7 @@ for line in lines:
         yv_estimated.append(float(values[5]))
         xv_actual.append(float(values[6]))
         yv_actual.append(float(values[7]))
-        time.append(len(time) * 0.5)  # Each reading is 0.5 seconds apart
+        time.append(len(time) * 0.2)  # Each reading is 0.2 seconds apart
 
 def plot_particular_test(test_number):
     # Plot the data

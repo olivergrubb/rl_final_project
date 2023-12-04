@@ -9,27 +9,31 @@ import rclpy
 import cv2
 from cv_bridge import CvBridge
 import time
+from reset_world import reset_world
+import timeit
 
 class KalmanTrackingNode(Node):
     def __init__(self):
         super().__init__('kalman_tracking_node')
-        self.dt = 0.5
+        self.get_logger().info(f'Kalman Tracking Node Started.')
+        self.dt = 0.2
         self.br = CvBridge()
         initial_state = self._estimate_initial_state()
         initial_covariance = np.eye(4)
         self.kalman_filter = KalmanFilter(self.dt, initial_state, initial_covariance)
-        self._log_results()
         self.last_recieved_message = None
         self.last_measured_position = None
         self.last_measured_velocity = np.array([0, 0])
         self.publisher = self.create_publisher(Twist, '/chaser0/cmd_vel', 10)
         self.lost_target = False
         self.lost_target_count = 0
+        self.last_known_x = None
+        self._log_results()
         self._track()
 
     def _track(self):
         while True:
-            
+            start_time = timeit.default_timer()
             # Position of the evader is estimated by the depth camera on the chaser
             self._get_last_message('/chaser0/camera/depth/image_raw', Image)
             depth_image = self.last_recieved_message
@@ -39,10 +43,17 @@ class KalmanTrackingNode(Node):
 
             if center_x is None or center_y is None:
                 self.get_logger().warning(f'Target not found - Searching for target.')
-                self._search()
+                self._search(self.last_known_x)
             else:
+                self.last_known_x = center_x
                 self.lost_target = False
                 depth = self._get_depth_at_point(depth_image, center_x, center_y)
+
+                if depth < 0.4:
+                    self.get_logger().warning(f'Caught Target.')
+                    self._stop()
+                    break
+
                 # Get the current state of the chaser
                 self._get_last_message('/chaser0/odom', Odometry)
                 chaser_odom = self.last_recieved_message.pose.pose
@@ -81,9 +92,11 @@ class KalmanTrackingNode(Node):
                 self._log_results()
 
                 # Use predicted state to move the chaser towards the evader
-                self._move_chaser(center_x)
-            # Sleep for 0.5 seconds
-            time.sleep(self.dt)
+                self._move_chaser(center_x, depth)
+            #time.sleep(self.dt)
+            elapsed = timeit.default_timer() - start_time
+
+            time.sleep(max(0, self.dt - elapsed))
 
     def _estimate_initial_state(self):
         # Get last image from camera and corresponding depth data
@@ -91,11 +104,17 @@ class KalmanTrackingNode(Node):
         camera_image = self.last_recieved_message
         self._get_last_message('/chaser0/camera/depth/image_raw', Image)
         depth_image = self.last_recieved_message
+
+        while depth_image.encoding != '32FC1':
+            self._get_last_message('/chaser0/camera/depth/image_raw', Image)
+            depth_image = self.last_recieved_message
+
         # Find the position of the evader in the image by looking for blue pixels. Location will be center of the blue pixels
         center_x, center_y = self._find_blue_center(camera_image)
 
         if center_x is None or center_y is None:
             self.get_logger().warning(f'No blue pixels found in the image. Cannot estimate initial state.')
+            reset_world(self, 'manual')
             return None
         
         # Get the depth data at the position of the evader
@@ -115,48 +134,60 @@ class KalmanTrackingNode(Node):
         # Return the initial state
         return np.array([initial_state_x, initial_state_y, velocity_vector_to_goal[0], velocity_vector_to_goal[1]])
 
-    def _move_chaser(self, center_x):
+    def _move_chaser(self, center_x, depth):
 
         # Calculate the desired position of the blue area in the image
         desired_center_x = 640 / 2
 
         # Calculate the difference between the current and desired positions
         delta_x = desired_center_x - center_x
+        # scale the difference by the depth to get the angular velocity
+        angular_velocity = (delta_x / 320) * 0.5
 
-        # Normalize the difference to be between -0.3 and 0.3
-        if delta_x > 0:
-            delta_x = min(delta_x, 320)
-            delta_x = delta_x / 320 * 0.4
-        else:
-            delta_x = max(delta_x, -320)
-            delta_x = delta_x / 320 * 0.4
-        
         # Move the chaser robot based on the difference in positions
         request = Twist()
-        request.linear.x = 0.5
-        request.angular.z = delta_x  # Adjust the angular velocity based on the difference in x position
+        if depth < 1:
+            request.linear.x = 1.0
+        else:
+            request.linear.x = 0.6
+        request.angular.z = angular_velocity  # Adjust the angular velocity based on the difference in x position
         self.publisher.publish(request)
 
-    def _search(self):
+    def _search(self, last_known_x):
         if not self.lost_target:
             # Write to file that the target has been lost
             with open('Results.txt', 'a') as f:
                 f.write(f'TARGET LOST\n')
         self.lost_target = True
-        # Rotate clockwise
+        # Rotate in direction of last known position
         request = Twist()
         request.linear.x = 0.0
-        request.angular.z = -0.4
+        if last_known_x is None:
+            request.angular.z = 0.5
+        else:
+            request.angular.z = -0.5 * np.sign(last_known_x - 320 / 2)
         self.publisher.publish(request)
+    
+    def _stop(self):
+        with open('Results.txt', 'a') as f:
+                f.write(f'CAUGHT\n')
+        request = Twist()
+        request.linear.x = 0.0
+        request.angular.z = 0.0
+        self.publisher.publish(request)
+        time.sleep(0.5)
+        reset_world(self, 'manual')
+        time.sleep(0.5)
+        self.__init__()
 
     def _get_last_message(self, topic, data_type):
         self.subscription = self.create_subscription(data_type, topic, self._singular_msg, 10)
         rclpy.spin_once(self)
-        timeout_sec = 5.0
+        timeout_sec = 0.2
         start_time = self.get_clock().now()
 
         while not self.last_recieved_message:
-            rclpy.spin_once(self, timeout_sec=1.0)
+            rclpy.spin_once(self, timeout_sec=0.2)
 
             if (self.get_clock().now().to_msg().sec - start_time.to_msg().sec) > timeout_sec:
                 self.get_logger().warning(f'Timeout reached. No message received on topic {topic}.')
@@ -195,8 +226,12 @@ class KalmanTrackingNode(Node):
 
         # Calculate the center of the contour
         moments = cv2.moments(largest_contour)
-        center_x = int(moments["m10"] / moments["m00"])
-        center_y = int(moments["m01"] / moments["m00"])
+        if moments["m00"] != 0:
+            center_x = int(moments["m10"] / moments["m00"])
+            center_y = int(moments["m01"] / moments["m00"])
+        else:
+            center_x = 0
+            center_y = 0
 
         return center_x, center_y
     
@@ -230,7 +265,7 @@ class KalmanTrackingNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-
+    
     kalman_tracking_node = KalmanTrackingNode()
 
     rclpy.spin(kalman_tracking_node)

@@ -47,12 +47,12 @@ class GUI:
                         y_a = values[4]
                         gui.plot_position((float(x_p), float(y_p)), "prediction")
                         gui.plot_position((float(x_a), float(y_a)), "ground truth")
-                        time.sleep(0.5)
+                        time.sleep(0.15)
                     else:
                         x_c = values[1]
                         y_c = values[2]
                         gui.plot_position((float(x_c), float(y_c)), "correction")
-                        time.sleep(0.1)
+                        time.sleep(0.05)
                     gui.root.update()
                     counter += 1
                         
